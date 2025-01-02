@@ -1,19 +1,25 @@
-use std::sync::mpsc::channel;
-
 use image::RgbaImage;
-use scopeguard::defer;
+use std::sync::mpsc::channel;
 use windows::{
     core::{factory, IInspectable, Interface},
     Foundation::TypedEventHandler,
     Graphics::{
         Capture::{Direct3D11CaptureFramePool, GraphicsCaptureItem},
-        DirectX::DirectXPixelFormat,
+        DirectX::{Direct3D11::IDirect3DDevice, DirectXPixelFormat},
     },
     Win32::{
         Foundation::HWND,
-        Graphics::{Direct3D11::D3D11_CREATE_DEVICE_BGRA_SUPPORT, Gdi::HMONITOR},
+        Graphics::{
+            Direct3D::D3D_DRIVER_TYPE_HARDWARE,
+            Direct3D11::{
+                D3D11CreateDevice, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                D3D11_CREATE_DEVICE_SINGLETHREADED, D3D11_SDK_VERSION,
+            },
+            Dxgi::IDXGIDevice,
+            Gdi::HMONITOR,
+        },
         System::WinRT::{
-            Direct3D11::IDirect3DDxgiInterfaceAccess,
+            Direct3D11::{CreateDirect3D11DeviceFromDXGIDevice, IDirect3DDxgiInterfaceAccess},
             Graphics::Capture::IGraphicsCaptureItemInterop,
         },
     },
@@ -21,20 +27,28 @@ use windows::{
 
 use crate::{video_recorder::Frame, XCapError, XCapResult};
 
-use super::{
-    impl_video_recorder::texture_to_frame,
-    utils::{create_d3d11_device, create_direct3d_device},
-};
+use super::impl_video_recorder::texture_to_frame;
 
 #[allow(unused)]
 pub fn wgc_capture(item: GraphicsCaptureItem) -> XCapResult<Frame> {
     unsafe {
-        let d3d_device = create_d3d11_device(D3D11_CREATE_DEVICE_BGRA_SUPPORT)?;
+        let mut d3d_device = None;
+        D3D11CreateDevice(
+            None,
+            D3D_DRIVER_TYPE_HARDWARE,
+            None,
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_SINGLETHREADED,
+            None,
+            D3D11_SDK_VERSION,
+            Some(&mut d3d_device),
+            None,
+            None,
+        )?;
+        let d3d_device = d3d_device.ok_or(XCapError::new("Call D3D11CreateDevice failed"))?;
         let d3d_context = d3d_device.GetImmediateContext()?;
-        let direct_3d_device = create_direct3d_device(&d3d_device)?;
-        defer!({
-            direct_3d_device.Close();
-        });
+        let dxgi_device = d3d_device.cast::<IDXGIDevice>()?;
+        let inspectable = CreateDirect3D11DeviceFromDXGIDevice(&dxgi_device)?;
+        let direct_3d_device = inspectable.cast::<IDirect3DDevice>()?;
 
         let frame_pool = Direct3D11CaptureFramePool::CreateFreeThreaded(
             &direct_3d_device,
@@ -42,14 +56,8 @@ pub fn wgc_capture(item: GraphicsCaptureItem) -> XCapResult<Frame> {
             1,
             item.Size()?,
         )?;
-        defer!({
-            frame_pool.Close();
-        });
 
         let session = frame_pool.CreateCaptureSession(&item)?;
-        defer!({
-            session.Close();
-        });
 
         let (sender, receiver) = channel();
         frame_pool.FrameArrived(
@@ -66,6 +74,9 @@ pub fn wgc_capture(item: GraphicsCaptureItem) -> XCapResult<Frame> {
         session.StartCapture()?;
 
         let frame = receiver.recv().unwrap();
+
+        session.Close()?;
+        direct_3d_device.Close()?;
 
         let surface = frame.Surface()?;
         let access = surface.cast::<IDirect3DDxgiInterfaceAccess>()?;
