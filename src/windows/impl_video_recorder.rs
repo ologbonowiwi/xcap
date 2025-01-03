@@ -2,22 +2,18 @@ use std::{slice, sync::Arc};
 
 use windows::{
     core::Interface,
-    Win32::{
-        Foundation::HMODULE,
-        Graphics::{
-            Direct3D::D3D_DRIVER_TYPE_HARDWARE,
-            Direct3D11::{
-                D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Resource,
-                ID3D11Texture2D, D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-                D3D11_CREATE_DEVICE_SINGLETHREADED, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ,
-                D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
-            },
-            Dxgi::{
-                IDXGIDevice, IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource,
-                DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO,
-            },
-            Gdi::HMONITOR,
+    Win32::Graphics::{
+        Direct3D11::{
+            ID3D11Device, ID3D11DeviceContext, ID3D11Resource, ID3D11Texture2D,
+            D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+            D3D11_CREATE_DEVICE_SINGLETHREADED, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ,
+            D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
         },
+        Dxgi::{
+            IDXGIDevice, IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource,
+            DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO,
+        },
+        Gdi::HMONITOR,
     },
 };
 
@@ -92,13 +88,9 @@ pub struct ImplVideoRecorder {
 }
 
 impl ImplVideoRecorder {
-    pub fn new(h_monitor: HMONITOR) -> XCapResult<Self> {
+    pub fn new(hmonitor: HMONITOR) -> XCapResult<Self> {
         unsafe {
-            let mut d3d_device = None;
-            D3D11CreateDevice(
-                None,
-                D3D_DRIVER_TYPE_HARDWARE,
-                HMODULE::default(),
+            let d3d_device = create_d3d11_device(
                 D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_SINGLETHREADED,
             )?;
 
@@ -116,7 +108,7 @@ impl ImplVideoRecorder {
                 let output1 = output.cast::<IDXGIOutput1>()?;
                 let duplication = output1.DuplicateOutput(&dxgi_device)?;
 
-                if output_desc.Monitor == h_monitor {
+                if output_desc.Monitor == hmonitor {
                     return Ok(Self {
                         d3d_device,
                         d3d_context,

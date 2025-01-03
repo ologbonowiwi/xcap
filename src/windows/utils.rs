@@ -1,29 +1,39 @@
 use std::mem;
 
 use image::RgbaImage;
-use scopeguard::{guard, ScopeGuard};
-use widestring::U16CString;
 use windows::{
-    core::{s, w, HRESULT, PCWSTR},
+    core::{s, w, Interface, HRESULT},
+    Graphics::DirectX::Direct3D11::IDirect3DDevice,
     Win32::{
-        Devices::Display::{
-            DisplayConfigGetDeviceInfo, GetDisplayConfigBufferSizes, QueryDisplayConfig,
-            DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME, DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME,
-            DISPLAYCONFIG_DEVICE_INFO_HEADER, DISPLAYCONFIG_MODE_INFO, DISPLAYCONFIG_PATH_INFO,
-            DISPLAYCONFIG_SOURCE_DEVICE_NAME, DISPLAYCONFIG_TARGET_DEVICE_NAME,
-            QDC_ONLY_ACTIVE_PATHS,
+        Foundation::{GetLastError, HANDLE},
+        Graphics::{
+            Direct3D::D3D_DRIVER_TYPE_HARDWARE,
+            Direct3D11::{
+                D3D11CreateDevice, ID3D11Device, D3D11_CREATE_DEVICE_FLAG, D3D11_SDK_VERSION,
+            },
+            Dxgi::IDXGIDevice,
         },
-        Foundation::{CloseHandle, FreeLibrary, GetLastError, HANDLE, HMODULE},
-        Graphics::Gdi::MONITORINFOEXW,
         System::{
-            LibraryLoader::{GetProcAddress, LoadLibraryW},
+            LibraryLoader::GetProcAddress,
             Registry::{RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ},
-            Threading::{OpenProcess, PROCESS_ACCESS_RIGHTS},
+            WinRT::Direct3D11::CreateDirect3D11DeviceFromDXGIDevice,
         },
     },
 };
 
 use crate::{error::XCapResult, XCapError};
+
+use super::boxed::BoxHModule;
+
+pub(super) fn wide_string_to_string(wide_string: &[u16]) -> XCapResult<String> {
+    let string = if let Some(null_pos) = wide_string.iter().position(|pos| *pos == 0) {
+        String::from_utf16(&wide_string[..null_pos])?
+    } else {
+        String::from_utf16(wide_string)?
+    };
+
+    Ok(string)
+}
 
 pub(super) fn get_build_number() -> u32 {
     unsafe {
@@ -46,9 +56,7 @@ pub(super) fn get_build_number() -> u32 {
 
         buf.set_len(buf_len as usize);
 
-        let build_version = U16CString::from_vec_truncate(buf)
-            .to_string()
-            .unwrap_or_default();
+        let build_version = wide_string_to_string(&buf).unwrap_or_default();
 
         build_version.parse().unwrap_or(0)
     }
@@ -103,12 +111,12 @@ type GetProcessDpiAwareness =
 
 pub(super) fn get_process_is_dpi_awareness(process: HANDLE) -> XCapResult<bool> {
     unsafe {
-        let scope_guard_hmodule = load_library(w!("Shcore.dll"))?;
+        let box_hmodule = BoxHModule::new(w!("Shcore.dll"))?;
 
         let get_process_dpi_awareness_proc_address =
-            GetProcAddress(*scope_guard_hmodule, s!("GetProcessDpiAwareness")).ok_or(
-                XCapError::new("GetProcAddress GetProcessDpiAwareness failed"),
-            )?;
+            GetProcAddress(*box_hmodule, s!("GetProcessDpiAwareness")).ok_or(XCapError::new(
+                "GetProcAddress GetProcessDpiAwareness failed",
+            ))?;
 
         let get_process_dpi_awareness: GetProcessDpiAwareness =
             mem::transmute(get_process_dpi_awareness_proc_address);
@@ -122,121 +130,31 @@ pub(super) fn get_process_is_dpi_awareness(process: HANDLE) -> XCapResult<bool> 
     }
 }
 
-pub(super) fn load_library(
-    lib_filename: PCWSTR,
-) -> XCapResult<ScopeGuard<HMODULE, impl FnOnce(HMODULE)>> {
+pub fn create_d3d11_device(flags: D3D11_CREATE_DEVICE_FLAG) -> XCapResult<ID3D11Device> {
     unsafe {
-        let hmodule = LoadLibraryW(lib_filename)?;
-
-        if hmodule.is_invalid() {
-            return Err(XCapError::new(format!(
-                "LoadLibraryW error {:?}",
-                GetLastError()
-            )));
-        }
-
-        let scope_guard_hmodule = guard(hmodule, |val| {
-            if let Err(err) = FreeLibrary(val) {
-                log::error!("FreeLibrary {:?} failed {:?}", val, err);
-            }
-        });
-
-        Ok(scope_guard_hmodule)
-    }
-}
-
-pub(super) fn open_process(
-    dw_desired_access: PROCESS_ACCESS_RIGHTS,
-    b_inherit_handle: bool,
-    dw_process_id: u32,
-) -> XCapResult<ScopeGuard<HANDLE, impl FnOnce(HANDLE)>> {
-    unsafe {
-        let handle = OpenProcess(dw_desired_access, b_inherit_handle, dw_process_id)?;
-
-        if handle.is_invalid() {
-            return Err(XCapError::new(format!(
-                "OpenProcess error {:?}",
-                GetLastError()
-            )));
-        }
-
-        let scope_guard_handle = guard(handle, |val| {
-            if let Err(err) = CloseHandle(val) {
-                log::error!("CloseHandle {:?} failed {:?}", val, err);
-            }
-        });
-
-        Ok(scope_guard_handle)
-    }
-}
-
-pub(super) fn get_monitor_name(monitor_info_ex_w: MONITORINFOEXW) -> XCapResult<String> {
-    unsafe {
-        let mut number_of_paths = 0;
-        let mut number_of_modes = 0;
-        GetDisplayConfigBufferSizes(
-            QDC_ONLY_ACTIVE_PATHS,
-            &mut number_of_paths,
-            &mut number_of_modes,
-        )
-        .ok()?;
-
-        let mut paths = vec![DISPLAYCONFIG_PATH_INFO::default(); number_of_paths as usize];
-        let mut modes = vec![DISPLAYCONFIG_MODE_INFO::default(); number_of_modes as usize];
-
-        QueryDisplayConfig(
-            QDC_ONLY_ACTIVE_PATHS,
-            &mut number_of_paths,
-            paths.as_mut_ptr(),
-            &mut number_of_modes,
-            modes.as_mut_ptr(),
+        let mut d3d_device = None;
+        D3D11CreateDevice(
             None,
-        )
-        .ok()?;
+            D3D_DRIVER_TYPE_HARDWARE,
+            None,
+            flags,
+            None,
+            D3D11_SDK_VERSION,
+            Some(&mut d3d_device),
+            None,
+            None,
+        )?;
 
-        for path in paths {
-            let mut source = DISPLAYCONFIG_SOURCE_DEVICE_NAME {
-                header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
-                    r#type: DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME,
-                    size: mem::size_of::<DISPLAYCONFIG_SOURCE_DEVICE_NAME>() as u32,
-                    adapterId: path.sourceInfo.adapterId,
-                    id: path.sourceInfo.id,
-                },
-                ..DISPLAYCONFIG_SOURCE_DEVICE_NAME::default()
-            };
+        d3d_device.ok_or(XCapError::new("Call D3D11CreateDevice failed"))
+    }
+}
 
-            if DisplayConfigGetDeviceInfo(&mut source.header) != 0 {
-                continue;
-            }
+pub fn create_direct3d_device(d3d_device: &ID3D11Device) -> XCapResult<IDirect3DDevice> {
+    unsafe {
+        let dxgi_device = d3d_device.cast::<IDXGIDevice>()?;
+        let inspectable = CreateDirect3D11DeviceFromDXGIDevice(&dxgi_device)?;
+        let direct_3d_device = inspectable.cast::<IDirect3DDevice>()?;
 
-            if source.viewGdiDeviceName != monitor_info_ex_w.szDevice {
-                continue;
-            }
-
-            let mut target = DISPLAYCONFIG_TARGET_DEVICE_NAME {
-                header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
-                    r#type: DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME,
-                    size: mem::size_of::<DISPLAYCONFIG_TARGET_DEVICE_NAME>() as u32,
-                    adapterId: path.sourceInfo.adapterId,
-                    id: path.targetInfo.id,
-                },
-                ..DISPLAYCONFIG_TARGET_DEVICE_NAME::default()
-            };
-
-            if DisplayConfigGetDeviceInfo(&mut target.header) != 0 {
-                continue;
-            }
-
-            let name =
-                U16CString::from_vec_truncate(target.monitorFriendlyDeviceName).to_string()?;
-
-            if name.is_empty() {
-                return Err(XCapError::new("Monitor name is empty"));
-            }
-
-            return Ok(name);
-        }
-
-        Err(XCapError::new("Get monitor name failed"))
+        Ok(direct_3d_device)
     }
 }
