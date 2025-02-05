@@ -214,6 +214,16 @@ impl ImplWindow {
             )
         };
 
+        let is_focused = {
+            let setup = conn.get_setup();
+            let screen = setup
+                .roots()
+                .next()
+                .ok_or(XCapError::new("No screen found"))?;
+            let focused_window = get_focused_window(conn, screen.root())?;
+            focused_window == *window
+        };
+
         Ok(ImplWindow {
             window: *window,
             id: window.resource_id(),
