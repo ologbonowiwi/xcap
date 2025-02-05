@@ -68,6 +68,19 @@ fn get_window_property(
     Ok(window_property_reply)
 }
 
+fn get_focused_window(conn: &Connection, root_window: Window) -> XCapResult<Window> {
+    let active_window_atom = get_atom(conn, "_NET_ACTIVE_WINDOW")?;
+
+    let active_window_reply =
+        get_window_property(conn, root_window, active_window_atom, ATOM_WINDOW, 0, 1)?;
+    let active_window = active_window_reply
+        .value::<Window>()
+        .first()
+        .copied()
+        .unwrap_or(Window::none());
+    Ok(active_window)
+}
+
 pub fn get_window_pid(conn: &Connection, window: &Window) -> XCapResult<u32> {
     let wm_pid_atom = get_atom(conn, "_NET_WM_PID")?;
 
@@ -267,7 +280,15 @@ impl ImplWindow {
                         }
                     };
 
-                    let is_focused = active_window_id.eq(&Some(client.resource_id()));
+                    let is_focused = {
+                        let setup = conn.get_setup();
+                        let screen = setup
+                            .roots()
+                            .next()
+                            .ok_or(XCapError::new("No screen found"))?;
+                        let focused_window = get_focused_window(conn, screen.root())?;
+                        focused_window == *window
+                    };
 
                     if let Ok(impl_window) =
                         ImplWindow::new(&conn, client, pid, z, is_focused, &impl_monitors)

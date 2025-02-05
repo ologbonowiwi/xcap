@@ -1,14 +1,14 @@
 use std::ffi::c_void;
 
 use image::RgbaImage;
-use objc2_app_kit::NSWorkspace;
 use objc2_core_foundation::{
     CFArrayGetCount, CFArrayGetValueAtIndex, CFBoolean, CFBooleanGetValue, CFDictionary,
     CFDictionaryGetValue, CFNumber, CFNumberGetValue, CFNumberType, CFString, CGPoint, CGRect,
     CGSize,
 };
 use objc2_core_graphics::{
-    CGDisplayBounds, CGMainDisplayID, CGRectContainsPoint, CGRectIntersectsRect,
+    CGDisplayBounds, CGEventCreate, CGEventGetUnflippedLocation, CGEventSourceCreate,
+    CGEventSourceStateID, CGMainDisplayID, CGRectContainsPoint, CGRectIntersectsRect,
     CGRectMakeWithDictionaryRepresentation, CGWindowListCopyWindowInfo, CGWindowListOption,
 };
 
@@ -78,6 +78,17 @@ fn get_cf_number_i32_value(cf_dictionary: &CFDictionary, key: &str) -> XCapResul
     }
 }
 
+fn get_mouse_position() -> CGPoint {
+    unsafe {
+        // HIDSystemState = 1
+        let source = CGEventSourceCreate(CGEventSourceStateID::HIDSystemState);
+        let event = CGEventCreate(source.as_deref());
+        let position = CGEventGetUnflippedLocation(event.as_deref());
+
+        position
+    }
+}
+
 fn get_cf_string_value(cf_dictionary: &CFDictionary, key: &str) -> XCapResult<String> {
     let value_ref = get_cf_dictionary_get_value(cf_dictionary, key)? as *const CFString;
     let value = unsafe { (*value_ref).to_string() };
@@ -117,7 +128,6 @@ impl ImplWindow {
         window_name: String,
         window_owner_name: String,
         z: i32,
-        focused_app_pid: Option<i32>,
     ) -> XCapResult<ImplWindow> {
         let id = get_cf_number_i32_value(window_cf_dictionary, "kCGWindowNumber")? as u32;
         let pid = get_cf_number_i32_value(window_cf_dictionary, "kCGWindowOwnerPID")?;
@@ -154,7 +164,7 @@ impl ImplWindow {
         let is_minimized =
             !get_cf_bool_value(window_cf_dictionary, "kCGWindowIsOnscreen")? && !is_maximized;
 
-        let is_focused = focused_app_pid.eq(&Some(pid));
+        let is_focused = unsafe { CGRectContainsPoint(cg_rect, get_mouse_position()) };
 
         Ok(ImplWindow {
             id,
@@ -176,10 +186,6 @@ impl ImplWindow {
     pub fn all() -> XCapResult<Vec<ImplWindow>> {
         unsafe {
             let impl_monitors = ImplMonitor::all()?;
-            let workspace = NSWorkspace::sharedWorkspace();
-            let focused_app_pid = workspace
-                .frontmostApplication()
-                .map(|focused_app| focused_app.processIdentifier());
 
             let mut impl_windows = Vec::new();
 
@@ -236,7 +242,6 @@ impl ImplWindow {
                     window_name.clone(),
                     window_owner_name.clone(),
                     num_windows as i32 - i as i32 - 1,
-                    focused_app_pid,
                 ) {
                     impl_windows.push(impl_window);
                 } else {
